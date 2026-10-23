@@ -93,8 +93,9 @@ def verify_firebase_token(auth_header):
             return _decode_jwt_payload_unverified(token, project_id)
         return None, (401, "Sesi login tidak valid atau kedaluwarsa. Login kembali dengan Google.")
 
+import tempfile
 BASE_DIR = Path(__file__).resolve().parent
-USER_DATA_DIR = BASE_DIR / ".user_data"
+USER_DATA_DIR = (Path(tempfile.gettempdir()) / "jafn_user_data") if os.environ.get("VERCEL") else (BASE_DIR / ".user_data")
 KEY_FILE = BASE_DIR / "Api.key"
 MAX_BODY = 20 * 1024 * 1024
 NEMOTRON_ULTRA_FREE = "nvidia/nemotron-3-ultra-550b-a55b:free"

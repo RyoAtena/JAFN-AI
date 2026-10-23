@@ -1,8 +1,12 @@
 Api.key
+api.key
 .env
 __pycache__/
 *.pyc
 .user_data/
+.vercel/
+check*.js
+script*.js
 
 # Secret Pollinations API key
 Pollinations.key
