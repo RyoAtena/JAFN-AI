@@ -348,11 +348,41 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
     def do_POST(self):
         route = self.path.split("?", 1)[0].rstrip("/") or "/"
-        if route not in ("/api/chat", "/api/check-prompt", "/api/user-data", "/api/transcribe"): return self.send_json(404, {"error": "Endpoint tidak ditemukan."})
+        if route not in ("/api/chat", "/api/check-prompt", "/api/user-data", "/api/transcribe", "/api/tts"): return self.send_json(404, {"error": "Endpoint tidak ditemukan."})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > MAX_BODY: return self.send_json(413, {"error": "Permintaan kosong atau terlalu besar. Gunakan dokumen maksimal 10 MB dan gambar maksimal 5 MB."})
             body = json.loads(self.rfile.read(length).decode("utf-8"))
+
+            if route == "/api/tts":
+                import urllib.parse
+                raw_text = str(body.get("text") or "").strip()[:1200]
+                lang = str(body.get("lang") or "id").split("-")[0].strip().lower() or "id"
+                if not raw_text:
+                    return self.send_json(400, {"error": "Teks suara kosong."})
+                chunks = []
+                words = raw_text.split()
+                cur = ""
+                for w in words:
+                    if len(cur) + len(w) + 1 <= 180:
+                        cur = f"{cur} {w}".strip()
+                    else:
+                        if cur: chunks.append(cur)
+                        cur = w[:180]
+                if cur: chunks.append(cur)
+                mp3_parts = []
+                try:
+                    for ch in chunks[:8]:
+                        q = urllib.parse.quote(ch)
+                        tts_url = f"https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl={lang}&q={q}"
+                        req = urllib.request.Request(tts_url, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(req, timeout=10) as resp:
+                            mp3_parts.append(resp.read())
+                    merged_mp3 = b"".join(mp3_parts)
+                    b64_mp3 = base64.b64encode(merged_mp3).decode("ascii")
+                    return self.send_json(200, {"audio": f"data:audio/mpeg;base64,{b64_mp3}"})
+                except Exception as exc:
+                    return self.send_json(502, {"error": f"Gagal membuat suara TTS: {exc}"})
 
             if route == "/api/transcribe":
                 import io
@@ -395,7 +425,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             if not api_key or api_key.lower() in ("your_api_key_here", "isi_api_key_di_sini", "api_key"):
                 return self.send_json(500, {"error": "API key belum dikonfigurasi. Isi file Api.key atau atur environment variable OPENROUTER_API_KEY.", "error_type": "missing_api_key"})
 
-            text_models = [TEXT_MODEL, NEMOTRON_ULTRA_FREE, NEMOTRON_ULTRA_PAID, "nvidia/nemotron-3-super-120b-a12b:free"]
+            text_models = [TEXT_MODEL, NEMOTRON_ULTRA_FREE, "nvidia/nemotron-3.5-lightning:free", "openrouter/free", NEMOTRON_ULTRA_PAID]
 
             if route == "/api/check-prompt":
                 prompt = body.get("prompt", "")
@@ -511,13 +541,13 @@ PROMPT UNTUK DIPERIKSA:
             if ENABLE_WEB_SEARCH:
                 clean[0]["content"] += "\n\nJika hasil pencarian web real-time tersedia pada request ini, prioritaskan sumber tepercaya dan sertakan tautan sumber relevan."
 
-            chosen_models = [VISION_MODEL, "nvidia/nemotron-3.5-super-vl:free", "google/gemini-2.5-flash"] if image else text_models
+            chosen_models = [VISION_MODEL, "nvidia/nemotron-3.5-super-vl:free", "openrouter/free"] if image else text_models
             status, result, reply, retry_after = call_ai_completion(
                 api_key,
                 chosen_models,
                 clean,
                 max_tokens=1024 if image else None,
-                reasoning_effort="medium",
+                reasoning_effort=None,
                 use_web_plugin=ENABLE_WEB_SEARCH,
                 title="JAFN AI",
             )

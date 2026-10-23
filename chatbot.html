@@ -514,61 +514,80 @@ async function requestMicrophoneAccess({withLiveMeter=false}={}){
   }
 }
 
+let speakNextReplyOnce=false,activeTtsAudio=null;
 function cleanTextForSpeech(text){return String(text||'').replace(/```[\s\S]*?```/g,' blok kode ').replace(/`([^`]+)`/g,'$1').replace(/!\[[^\]]*\]\([^)]*\)/g,' gambar ').replace(/\[([^\]]+)\]\([^)]*\)/g,'$1').replace(/[#*_~>|]/g,' ').replace(/https?:\/\/\S+/g,' tautan ').replace(/\s+/g,' ').trim().slice(0,4500);}
-function stopVoiceSpeech(){try{if('speechSynthesis' in window)window.speechSynthesis.cancel()}catch{}voiceIsSpeaking=false;}
-function speakVoiceReply(text){
-  if(!voiceActive)return;
+function stopVoiceSpeech(){
+  try{if(activeTtsAudio){activeTtsAudio.pause();activeTtsAudio.src='';activeTtsAudio=null;}}catch{}
+  try{if('speechSynthesis' in window)window.speechSynthesis.cancel();}catch{}
+  voiceIsSpeaking=false;
+}
+function speakWithBrowserSynthesis(spoken,voicePrefs,onDone){
   if(!('speechSynthesis' in window)||typeof SpeechSynthesisUtterance==='undefined'){
-    setVoiceStatus('Browser ini tidak mendukung suara balasan. Mendengarkan kembali…');
-    scheduleVoiceRestart(500);
-    return;
-  }
-  const spoken=cleanTextForSpeech(text);
-  if(!spoken){
-    setVoiceStatus('Silakan bicara, JAFN AI mendengarkan…');
-    scheduleVoiceRestart(500);
+    onDone();
     return;
   }
   try{
-    if(voiceRestartTimer){clearTimeout(voiceRestartTimer);voiceRestartTimer=null;}
-    // Hentikan sementara pengenalan suara supaya mikrofon tidak menangkap suara JAFN sendiri.
-    if(voiceRecognition&&voiceRecognitionRunning){try{voiceRecognition.stop();}catch{}}
     window.speechSynthesis.cancel();
     const utterance=new SpeechSynthesisUtterance(spoken);
-    const voicePrefs=readCompanionSettings();
     utterance.lang=voicePrefs.voiceLanguage==='auto'?'id-ID':voicePrefs.voiceLanguage;
-    utterance.rate=voicePrefs.voiceRate;
-    utterance.pitch=voicePrefs.voicePitch;
+    utterance.rate=voicePrefs.voiceRate||1;
+    utterance.pitch=voicePrefs.voicePitch||1;
     const voices=window.speechSynthesis.getVoices();
     const chosen=voices.find(v=>v.name===voicePrefs.voiceName);
     const matching=voices.find(v=>v.lang.toLowerCase()===utterance.lang.toLowerCase())||voices.find(v=>v.lang.toLowerCase().startsWith(utterance.lang.split('-')[0].toLowerCase()));
     const idVoice=chosen||(voicePrefs.voiceLanguage==='auto'?(voices.find(v=>/^id(-|_)?/i.test(v.lang))||voices.find(v=>/indonesia/i.test(v.name))):matching);
     if(idVoice)utterance.voice=idVoice;
-    voiceIsSpeaking=true;
-    setVoiceStatus('🔊 JAFN AI sedang berbicara…');
-    utterance.onend=()=>{
-      voiceIsSpeaking=false;
-      if(voiceActive){
-        setVoiceStatus('🎙️ Silakan bicara, JAFN AI mendengarkan…');
-        scheduleVoiceRestart(450);
-      }
-    };
-    utterance.onerror=(event)=>{
-      voiceIsSpeaking=false;
-      if(voiceActive){
-        const reason=event?.error;
-        if(reason==='interrupted'||reason==='canceled')return;
-        setVoiceStatus(reason==='not-allowed'?'Browser memblokir suara otomatis. Silakan bicara lagi…':'Suara balasan selesai. Silakan bicara, JAFN AI mendengarkan…');
-        scheduleVoiceRestart(500);
-      }
-    };
+    utterance.onend=onDone;
+    utterance.onerror=onDone;
     window.speechSynthesis.speak(utterance);
     if(window.speechSynthesis.paused)window.speechSynthesis.resume();
-  }catch(error){
-    voiceIsSpeaking=false;
-    setVoiceStatus('🎙️ Silakan bicara, JAFN AI mendengarkan…');
-    scheduleVoiceRestart(500);
+  }catch{
+    onDone();
   }
+}
+async function speakVoiceReply(text,forceSpeak=false){
+  if(!voiceActive&&!forceSpeak)return;
+  const spoken=cleanTextForSpeech(text);
+  if(!spoken){
+    if(voiceActive){
+      setVoiceStatus('🎙️ Silakan bicara, JAFN AI mendengarkan…');
+      scheduleVoiceRestart(500);
+    }
+    return;
+  }
+  if(voiceRestartTimer){clearTimeout(voiceRestartTimer);voiceRestartTimer=null;}
+  stopVoiceSpeech();
+  voiceIsSpeaking=true;
+  setVoiceStatus('🔊 JAFN AI sedang berbicara…',true);
+  const voicePrefs=readCompanionSettings();
+  const lang=voicePrefs.voiceLanguage==='auto'?'id-ID':voicePrefs.voiceLanguage;
+  const finishSpeech=()=>{
+    voiceIsSpeaking=false;
+    if(voiceActive){
+      setVoiceStatus('🎙️ Silakan bicara, JAFN AI mendengarkan…',true);
+      scheduleVoiceRestart(450);
+    }else{
+      setVoiceStatus('🔊 Selesai membacakan jawaban.',false);
+    }
+  };
+  try{
+    const res=await fetch('/api/tts',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:spoken.slice(0,1100),lang})
+    });
+    const data=await res.json();
+    if(res.ok&&data?.audio){
+      const audio=new Audio(data.audio);
+      activeTtsAudio=audio;
+      audio.playbackRate=Math.max(0.7,Math.min(1.4,Number(voicePrefs.voiceRate)||1));
+      audio.onended=finishSpeech;
+      audio.onerror=()=>speakWithBrowserSynthesis(spoken,voicePrefs,finishSpeech);
+      await audio.play();
+      return;
+    }
+  }catch{}
+  speakWithBrowserSynthesis(spoken,voicePrefs,finishSpeech);
 }
 
 function scheduleVoiceRestart(delay=400){
@@ -699,6 +718,7 @@ async function flushAndTranscribeVoice({stopAfter=false}={}){
       if(stopAfter){
         stopVoiceChat(false);
       }
+      speakNextReplyOnce=true;
       setVoiceStatus(`🚀 Mengirim pesan suara: "${transcript}"`,true);
       await sendMessage();
       return;
@@ -977,7 +997,7 @@ function renderMessage(text,role,imageUrl=null){
  const bubble=document.createElement('div');bubble.className='bubble';if(role==='assistant')renderMarkdownTable(bubble,text);else bubble.textContent=escapeText(text);
  if(imageUrl){const img=document.createElement('img');img.src=imageUrl;img.alt=role==='assistant'?'Gambar hasil generasi JAFN AI':'Gambar yang dikirim';img.loading='lazy';bubble.appendChild(img);}
  content.appendChild(bubble);
- if(role!=='user'){const mood=document.createElement('div');mood.className='bot-expression';mood.textContent=expression.face+' '+expression.label;content.appendChild(mood);if(String(text||'').trim()&&!row.classList.contains('thinking-message')){const feedback=document.createElement('div');feedback.className='message-feedback';feedback.innerHTML='<button type="button" data-feedback="up" title="Jawaban membantu">👍 Membantu</button><button type="button" data-feedback="down" title="Jawaban kurang tepat">👎 Kurang tepat</button><button type="button" data-feedback="improve" title="Minta AI memperbaiki jawaban">✨ Perbaiki jawaban</button><span class="feedback-status" aria-live="polite"></span>';feedback.dataset.answer=String(text).slice(0,5000);content.appendChild(feedback);}}
+ if(role!=='user'){const mood=document.createElement('div');mood.className='bot-expression';mood.textContent=expression.face+' '+expression.label;content.appendChild(mood);if(String(text||'').trim()&&!row.classList.contains('thinking-message')){const feedback=document.createElement('div');feedback.className='message-feedback';feedback.innerHTML='<button type="button" data-feedback="speak" title="Bacakan jawaban dengan suara">🔊 Suara</button><button type="button" data-feedback="up" title="Jawaban membantu">👍 Membantu</button><button type="button" data-feedback="down" title="Jawaban kurang tepat">👎 Kurang tepat</button><button type="button" data-feedback="improve" title="Minta AI memperbaiki jawaban">✨ Perbaiki jawaban</button><span class="feedback-status" aria-live="polite"></span>';feedback.dataset.answer=String(text).slice(0,5000);content.appendChild(feedback);}}
  row.append(avatar,content);messagesEl.appendChild(row);messagesEl.scrollTop=messagesEl.scrollHeight;return row;
 }
 function renderSaved(){for(const m of history){if(m.role==='user'||m.role==='assistant')renderMessage(m.content,m.role);}}
@@ -1093,7 +1113,7 @@ if(currentMode==='image'&&(imageFile||documentFile)){renderMessage('Mode Generat
 let attachedDocumentText='';if(documentFile){if(documentFile.size>10*1024*1024){renderMessage('Ukuran file maksimal 10 MB. Pilih file yang lebih kecil.','assistant');return;}try{attachedDocumentText=documentText||'';if(!attachedDocumentText)throw new Error('Isi file belum terbaca.');}catch{renderMessage('File tidak bisa dibaca. Pilih file teks yang didukung.','assistant');return;}}
 let imageData=null;if(imageFile){if(imageFile.size>5*1024*1024){renderMessage('Ukuran gambar maksimal 5 MB. Pilih gambar yang lebih kecil.','assistant');return;}try{imageData=await fileToDataUrl(imageFile)}catch{renderMessage('Gambar tidak bisa dibaca. Coba pilih file lain.','assistant');return;}}
 const sentMode=currentMode;const sentDocument=documentFile;const visibleContent=[text,sentDocument?`📄 File: ${sentDocument.name}`:'',imageFile?'🖼️ Gambar terlampir':''].filter(Boolean).join('\n')||'Tolong periksa lampiran ini.';const userContent=attachedDocumentText?`${text||'Tolong baca dan analisis file ini.'}\n\n[ISI FILE: ${sentDocument.name}]\n${attachedDocumentText.slice(0,100000)}\n[AKHIR ISI FILE]`:text||'Tolong jelaskan gambar ini.';renderMessage(visibleContent,'user',imageData);history.push({role:'user',content:userContent});saveHistory();promptEl.value='';resizePrompt();imageFile=null;documentFile=null;documentText='';$('preview').classList.add('hidden');$('imageInput').value='';$('documentPreview').classList.add('hidden');$('documentInput').value='';const typing=createThinkingMessage(sentMode==='image'?'Sedang membuat gambar':'JAFN AI sedang berpikir');setBusy(true);
-try{const payloadHistory=history.slice(-24);const endpoint='/api/chat';const requestBody={messages:payloadHistory,image:imageData,personality:readCompanionSettings().personality};const authToken=await window.jafnGetAuthToken?.();if(!authToken){window.jafnSetChatLocked(true,null);throw new Error('Login dengan Google terlebih dahulu agar chat dapat digunakan dan disimpan dengan aman.');}const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+authToken},body:JSON.stringify(requestBody)});let data;try{data=await res.json()}catch{throw new Error(`Respons server tidak valid (HTTP ${res.status}).`)}stopThinkingProgress();typing.remove();if(!res.ok||data.error){const err=new Error(data.error||`Permintaan gagal (HTTP ${res.status}).`);err.status=res.status;err.retryAfter=data.retry_after_seconds;err.errorType=data.error_type;throw err;}const reply=typeof data.reply==='string'?data.reply:JSON.stringify(data.reply);renderMessage(reply,'assistant',data.image||null);history.push({role:'assistant',content:reply,...(data.image?{image:data.image}:{})});saveHistory();if(voiceActive)speakVoiceReply(reply);try{localStorage.removeItem('ruangai_retry_at')}catch{};clearLimitStatus();recordSuccessfulChat();}catch(err){stopThinkingProgress();typing.remove();renderMessage('Maaf, '+err.message,'assistant');if(err.errorType==='rate_limit'||err.status===429){clearLimitStatus();setRetryTimer(err.retryAfter||60);}else if(err.errorType==='credits_exhausted'){try{localStorage.removeItem('ruangai_retry_at')}catch{};setLimitStatus('Kredit/kuota habis — tidak ada hitung mundur reset yang terverifikasi.');}}finally{setBusy(false);promptEl.focus();}}
+try{const payloadHistory=history.slice(-24);const endpoint='/api/chat';const requestBody={messages:payloadHistory,image:imageData,personality:readCompanionSettings().personality};const authToken=await window.jafnGetAuthToken?.();if(!authToken){window.jafnSetChatLocked(true,null);throw new Error('Login dengan Google terlebih dahulu agar chat dapat digunakan dan disimpan dengan aman.');}const res=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+authToken},body:JSON.stringify(requestBody)});let data;try{data=await res.json()}catch{throw new Error(`Respons server tidak valid (HTTP ${res.status}).`)}stopThinkingProgress();typing.remove();if(!res.ok||data.error){const err=new Error(data.error||`Permintaan gagal (HTTP ${res.status}).`);err.status=res.status;err.retryAfter=data.retry_after_seconds;err.errorType=data.error_type;throw err;}const reply=typeof data.reply==='string'?data.reply:JSON.stringify(data.reply);renderMessage(reply,'assistant',data.image||null);history.push({role:'assistant',content:reply,...(data.image?{image:data.image}:{})});saveHistory();if(voiceActive||speakNextReplyOnce){const force=speakNextReplyOnce;speakNextReplyOnce=false;speakVoiceReply(reply,force);}try{localStorage.removeItem('ruangai_retry_at')}catch{};clearLimitStatus();recordSuccessfulChat();}catch(err){speakNextReplyOnce=false;stopThinkingProgress();typing.remove();renderMessage('Maaf, '+err.message,'assistant');if(err.errorType==='rate_limit'||err.status===429){clearLimitStatus();setRetryTimer(err.retryAfter||60);}else if(err.errorType==='credits_exhausted'){try{localStorage.removeItem('ruangai_retry_at')}catch{};setLimitStatus('Kredit/kuota habis — tidak ada hitung mundur reset yang terverifikasi.');}}finally{setBusy(false);promptEl.focus();}}
 function fileToDataUrl(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file);});}
 function resizePrompt(){promptEl.style.height='auto';promptEl.style.height=Math.min(promptEl.scrollHeight,150)+'px';}
 initAppearance();renderUsageStats();$('themeBtn').addEventListener('click',()=>{const next=root.dataset.theme==='dark'?'light':'dark';root.dataset.theme=next;try{if(localStorage.getItem('jafn_privacy_save_preferences')!=='false')localStorage.setItem('ruangai_theme',next);else localStorage.removeItem('ruangai_theme')}catch{};$('themeBtn').textContent=next==='dark'?'☼':'☾'});$('wallpaperBtn').addEventListener('click',()=>$('wallpaperInput').click());$('wallpaperInput').addEventListener('change',async e=>{const file=e.target.files?.[0];if(!file)return;if(!['image/png','image/jpeg','image/webp'].includes(file.type)){alert('Pilih gambar PNG, JPG, atau WEBP.');e.target.value='';return;}if(file.size>2*1024*1024){alert('Ukuran gambar latar maksimal 2 MB agar browser tetap ringan.');e.target.value='';return;}try{const data=await readWallpaper(file);if(localStorage.getItem('jafn_privacy_save_preferences')!=='false')localStorage.setItem('ruangai_wallpaper',data);applyWallpaper(data);}catch{alert('Gambar tidak bisa disimpan. Coba gambar yang lebih kecil atau hapus gambar latar lama.');}e.target.value='';});$('clearWallpaperBtn').addEventListener('click',()=>{try{localStorage.removeItem('ruangai_wallpaper')}catch{}applyWallpaper(null);$('wallpaperInput').value='';});$('styleSelect').addEventListener('change',e=>{root.dataset.style=e.target.value;try{if(localStorage.getItem('jafn_privacy_save_preferences')!=='false')localStorage.setItem('ruangai_style',e.target.value);else localStorage.removeItem('ruangai_style')}catch{}});$('sendBtn').addEventListener('click',sendMessage);promptEl.addEventListener('input',resizePrompt);promptEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage();}});const attachMenu=$('attachMenu'),attachBtn=$('attachBtn');function closeAttachMenu(){attachMenu.classList.add('hidden');attachBtn.setAttribute('aria-expanded','false')}attachBtn.addEventListener('click',e=>{e.stopPropagation();attachMenu.classList.toggle('hidden');attachBtn.setAttribute('aria-expanded',String(!attachMenu.classList.contains('hidden')))});document.addEventListener('click',e=>{if(!e.target.closest('.attach-menu-wrap'))closeAttachMenu()});$('imageBtn').addEventListener('click',()=>{closeAttachMenu();$('imageInput').click()});$('documentBtn').addEventListener('click',()=>{closeAttachMenu();$('documentInput').click()});async function extractDocumentText(file){const name=file.name.toLowerCase();if(name.endsWith('.pdf')){if(!window.pdfjsLib)throw new Error('Pustaka pembaca PDF tidak termuat. Pastikan internet aktif lalu muat ulang halaman.');const data=new Uint8Array(await file.arrayBuffer());const pdf=await pdfjsLib.getDocument({data}).promise;let out=[];for(let pageNo=1;pageNo<=pdf.numPages;pageNo++){const page=await pdf.getPage(pageNo);const content=await page.getTextContent();out.push(content.items.map(x=>x.str||'').join(' '));if(out.join('\n').length>100000)break;}return out.join('\n\n').slice(0,100000);}if(name.endsWith('.docx')){if(!window.mammoth)throw new Error('Pustaka pembaca Word tidak termuat. Pastikan internet aktif lalu muat ulang halaman.');const result=await mammoth.extractRawText({arrayBuffer:await file.arrayBuffer()});return (result.value||'').slice(0,100000);}return (await file.text()).slice(0,100000);}
@@ -1207,7 +1227,7 @@ $('companionSave').addEventListener('click',()=>{const c=saveCompanionSettings({
 $('companionReset').addEventListener('click',()=>{saveCompanionSettings({...companionDefaults});fillCompanionForm()});$('focusModeToggle').addEventListener('change',()=>{document.body.classList.toggle('focus-mode',$('focusModeToggle').checked)});
 if(window.speechSynthesis){window.speechSynthesis.addEventListener?.('voiceschanged',populateVoiceChoices)}
 // Feed the selected personality into the server's system prompt without changing chat history.
-$('messages').addEventListener('click',e=>{const button=e.target.closest('button[data-feedback]');if(!button)return;const wrap=button.closest('.message-feedback');if(!wrap)return;const action=button.dataset.feedback;const status=wrap.querySelector('.feedback-status');if(action==='improve'){const answer=wrap.dataset.answer||'';promptEl.value='Tolong perbaiki jawaban JAFN AI sebelumnya agar lebih akurat, jelas, dan langsung menjawab pertanyaanku. Pertahankan bagian yang benar dan koreksi kekurangannya.\n\nJawaban sebelumnya:\n'+answer;resizePrompt();$('companionCenter').hidden=true;promptEl.focus();sendMessage();return;}wrap.querySelectorAll('button[data-feedback]').forEach(b=>{if(b!==button)b.classList.remove('selected')});button.classList.add('selected');status.textContent=action==='up'?'Terima kasih atas penilaianmu.':'Terima kasih. Kamu bisa memilih “Perbaiki jawaban”.';try{const key='jafn_response_feedback_v1';const list=JSON.parse(localStorage.getItem(key)||'[]');list.push({rating:action,at:Date.now()});localStorage.setItem(key,JSON.stringify(list.slice(-300)))}catch{}});
+$('messages').addEventListener('click',e=>{const button=e.target.closest('button[data-feedback]');if(!button)return;const wrap=button.closest('.message-feedback');if(!wrap)return;const action=button.dataset.feedback;const status=wrap.querySelector('.feedback-status');if(action==='speak'){const answer=wrap.dataset.answer||'';if(voiceIsSpeaking){stopVoiceSpeech();button.textContent='🔊 Suara';setVoiceStatus('Suara dihentikan.',false);}else{button.textContent='⏹️ Hentikan';speakVoiceReply(answer,true).finally(()=>{button.textContent='🔊 Suara';});}return;}if(action==='improve'){const answer=wrap.dataset.answer||'';promptEl.value='Tolong perbaiki jawaban JAFN AI sebelumnya agar lebih akurat, jelas, dan langsung menjawab pertanyaanku. Pertahankan bagian yang benar dan koreksi kekurangannya.\n\nJawaban sebelumnya:\n'+answer;resizePrompt();$('companionCenter').hidden=true;promptEl.focus();sendMessage();return;}wrap.querySelectorAll('button[data-feedback]').forEach(b=>{if(b!==button&&b.dataset.feedback!=='speak')b.classList.remove('selected')});button.classList.add('selected');status.textContent=action==='up'?'Terima kasih atas penilaianmu.':'Terima kasih. Kamu bisa memilih “Perbaiki jawaban”.';try{const key='jafn_response_feedback_v1';const list=JSON.parse(localStorage.getItem(key)||'[]');list.push({rating:action,at:Date.now()});localStorage.setItem(key,JSON.stringify(list.slice(-300)))}catch{}});
 const onboardingSteps=[{title:'Kenalan dengan JAFN AI',text:'Aku bisa menjawab pertanyaan, membantu menulis, dan menjelaskan topik dengan bahasa yang mudah dipahami.'},{title:'Kirim gambar atau dokumen',text:'Gunakan tombol + di dekat kolom pesan untuk mengirim gambar, PDF, Word, dan file teks yang didukung.'},{title:'Sesuaikan pengalamanmu',text:'Gunakan 🎭 untuk memilih karakter, mengatur suara, mengaktifkan Focus mode, atau melanjutkan percakapan sebelumnya. Tombol ☰ membuka riwayat chat.'}];let onboardingIndex=0;
 function showOnboardingStep(){const step=onboardingSteps[onboardingIndex];$('onboardingTitle').textContent=step.title;$('onboardingText').textContent=step.text;[...$('onboardingDots').children].forEach((d,i)=>d.classList.toggle('active',i===onboardingIndex));$('onboardingNext').textContent=onboardingIndex===onboardingSteps.length-1?'Mulai menggunakan JAFN AI':'Lanjut →';}
 function closeOnboarding(){ $('onboardingOverlay').hidden=true;try{localStorage.setItem('jafn_onboarding_done_v1','true')}catch{}}
