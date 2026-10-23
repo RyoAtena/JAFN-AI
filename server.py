@@ -177,14 +177,29 @@ def save_user_store(uid, chats=None, settings=None):
     except Exception:
         pass
 
+def _clean_key_value(raw_key):
+    val = (raw_key or "").strip().strip('"').strip("'").strip()
+    if val.lower().startswith("openrouter_api_key="):
+        val = val.split("=", 1)[1].strip().strip('"').strip("'").strip()
+    if val.lower().startswith("bearer "):
+        val = val[7:].strip()
+    return val
+
 def get_api_key():
-    key = (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("NVIDIA_API_KEY") or "").strip()
-    if not key and KEY_FILE.exists():
-        try:
-            key = KEY_FILE.read_text(encoding="utf-8").strip()
-        except OSError:
-            key = ""
-    return key
+    for env_name in ("OPENROUTER_API_KEY", "OPENROUTER_KEY", "API_KEY", "NVIDIA_API_KEY"):
+        val = _clean_key_value(os.environ.get(env_name, ""))
+        if val:
+            return val
+    for fname in ("Api.key", "api.key", "API.key"):
+        fpath = BASE_DIR / fname
+        if fpath.is_file():
+            try:
+                val = _clean_key_value(fpath.read_text(encoding="utf-8"))
+                if val:
+                    return val
+            except OSError:
+                pass
+    return ""
 
 def strip_thinking(text):
     if not isinstance(text, str):
@@ -285,7 +300,7 @@ def call_ai_completion(api_key, models, messages, temperature=None, max_tokens=N
 
             err = result.get("error", {})
             msg = (err.get("message", str(err)) if isinstance(err, dict) else str(err)).lower()
-            if status in (401, 403) or "invalid api key" in msg or "authentication" in msg or "user not found" in msg:
+            if status == 401 or "invalid api key" in msg or "user not found" in msg or "no auth credentials" in msg:
                 return status, result, None, retry_after
 
     return last_status, last_result, None, last_retry_after
@@ -308,7 +323,9 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         route = self.path.split("?", 1)[0].rstrip("/") or "/"
         if route == "/api/health":
-            return self.send_json(200, {"ok": True, "service": "JAFN AI", "model": TEXT_MODEL, "promptChecker": True})
+            k = get_api_key()
+            masked = (k[:12] + "..." + k[-4:]) if len(k) > 16 else ("missing" if not k else "invalid_length")
+            return self.send_json(200, {"ok": True, "service": "JAFN AI", "model": TEXT_MODEL, "promptChecker": True, "keyStatus": masked})
         if route == "/api/user-data":
             user, auth_error = verify_firebase_token(self.headers.get("Authorization", ""))
             if auth_error or not user or user.get("uid") == "anonymous":
@@ -514,8 +531,9 @@ PROMPT UNTUK DIPERIKSA:
                     try: seconds = max(1, min(3600, int(float(retry_after)))) if retry_after else 60
                     except (TypeError, ValueError): seconds = 60
                     return self.send_json(429, {"error": f"Model sedang terkena batas permintaan. Coba lagi dalam {seconds} detik.", "error_type": "rate_limit", "retry_after_seconds": seconds})
-                if status in (401, 403) or "api key" in low or "authentication" in low or "user not found" in low:
-                    return self.send_json(status if status in (401, 403) else 401, {"error": "API key ditolak. Periksa file Api.key atau environment variable OPENROUTER_API_KEY.", "error_type": "invalid_api_key"})
+                if status == 401 or "invalid api key" in low or "user not found" in low or "no auth credentials" in low:
+                    masked = (api_key[:12] + "..." + api_key[-4:]) if len(api_key) > 16 else "kosong"
+                    return self.send_json(401, {"error": f"API key ({masked}) ditolak oleh OpenRouter ({message}). Pastikan Environment Variable OPENROUTER_API_KEY di Vercel diisi dengan key terbaru lalu klik Redeploy.", "error_type": "invalid_api_key"})
                 if "data policy" in low or "privacy" in low:
                     return self.send_json(400, {"error": "Model gratis memerlukan izin Data Policy di OpenRouter. Aktifkan 'Enable free endpoints' di https://openrouter.ai/settings/privacy lalu coba lagi."})
                 if status == 503 or "unavailable" in low:
