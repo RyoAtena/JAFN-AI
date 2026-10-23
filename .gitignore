@@ -1,0 +1,8 @@
+Api.key
+.env
+__pycache__/
+*.pyc
+.user_data/
+
+# Secret Pollinations API key
+Pollinations.key
